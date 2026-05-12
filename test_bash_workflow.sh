@@ -2,7 +2,7 @@
 # Local test script for the bash-based PKGBUILD generation workflow
 # This simulates what the GitHub Actions workflow does without committing anything
 
-set -e
+set -euo pipefail
 
 echo "🧪 Testing bash-based PKGBUILD generation workflow"
 echo "=================================================="
@@ -10,7 +10,7 @@ echo ""
 
 # Check dependencies
 echo "📦 Checking dependencies..."
-for cmd in curl jq bsdtar sha512sum sed grep; do
+for cmd in curl jq bsdtar sha512sum sed grep awk; do
     if ! command -v $cmd &> /dev/null; then
         echo "❌ Missing: $cmd"
         exit 1
@@ -25,6 +25,12 @@ if [ ! -f PKGBUILD.sed ]; then
     exit 1
 fi
 
+TMP_DEB="$(mktemp /tmp/cursor_test.XXXXXX.deb)"
+cleanup() {
+    rm -f "$TMP_DEB"
+}
+trap cleanup EXIT
+
 # Get current version from PKGBUILD if it exists
 if [ -f PKGBUILD ]; then
     CURRENT_PKGVER=$(grep -E '^pkgver=' PKGBUILD | cut -d'=' -f2)
@@ -37,64 +43,37 @@ fi
 echo ""
 echo "🔍 Checking for updates..."
 
-MAJOR=$(echo "$CURRENT_PKGVER" | cut -d'.' -f1)
-MINOR=$(echo "$CURRENT_PKGVER" | cut -d'.' -f2)
-echo "Current version: ${CURRENT_PKGVER} (major: $MAJOR, minor: $MINOR)"
-
-# Helper functions
-get_redirect() {
-    curl -sI "https://api2.cursor.sh/updates/download/golden/linux-x64-deb/cursor/$1" | grep -i '^location:' | cut -d' ' -f2 | tr -d '\r\n'
-}
-
-extract_version() { echo "$1" | sed -n 's|.*cursor_\([0-9.]*\)_amd64.*|\1|p'; }
-extract_commit() { echo "$1" | sed -n 's|.*/production/\([^/]*\).*|\1|p'; }
-version_to_number() { echo "$1" | awk -F. '{printf "%d%03d%03d", $1, $2, $3}'; }
-
-# Check a major version series, stores best redirect in BEST_REDIRECT if higher
-check_major_series() {
-    local major=$1 start_minor=$2 minor=$start_minor max_checks=20
-    echo "Checking major version $major..."
-    while [ $((minor - start_minor)) -lt $max_checks ]; do
-        local redirect=$(get_redirect "$major.$minor")
-        [ -z "$redirect" ] && { echo "  $major.$minor -> (no response)"; break; }
-        
-        local ver=$(extract_version "$redirect")
-        echo "  $major.$minor -> $ver"
-        
-        local ver_num=$(version_to_number "$ver")
-        [ "$ver_num" -gt "$BEST_NUM" ] && { BEST_NUM=$ver_num; BEST_REDIRECT=$redirect; }
-        
-        # Fallback detection: returned major.minor < checked major.minor means stop
-        local ret_mm=$(echo "$ver" | cut -d'.' -f1-2)
-        [ "$(version_to_number "$ret_mm.0")" -lt "$(version_to_number "$major.$minor.0")" ] && { echo "  (fallback detected, stopping)"; break; }
-        
-        minor=$((minor + 1))
-    done
-}
-
-# Find the latest version by checking current and next major
-BEST_REDIRECT=""
-BEST_NUM=0
-check_major_series "$MAJOR" "$MINOR"
-check_major_series "$((MAJOR + 1))" 0
-
-if [ -z "$BEST_REDIRECT" ]; then
-    echo "❌ ERROR: Failed to get version from any endpoint"
-    exit 1
-fi
-
-# Extract version and commit from the best redirect (no re-check needed)
-NEW_PKGVER=$(extract_version "$BEST_REDIRECT")
-NEW_COMMIT=$(extract_commit "$BEST_REDIRECT")
-echo "Latest version found: $NEW_PKGVER"
-
-if [ -z "$NEW_PKGVER" ] || [ -z "$NEW_COMMIT" ]; then
-    echo "❌ ERROR: Failed to extract version or commit from redirect URL"
-    exit 1
-fi
-
 echo "Current version: ${CURRENT_PKGVER:-none}"
 echo "Current commit: ${CURRENT_COMMIT:-none}"
+
+extract_commit() { echo "$1" | sed -n 's|.*/production/\([^/]*\).*|\1|p'; }
+CURSOR_UPDATE_API="https://api2.cursor.sh/updates/api/update/linux-x64/cursor/0.0.0/deadbeef/stable"
+echo "🌐 Querying Cursor update API..."
+API_RESPONSE=$(curl -fsSL --retry 3 --retry-delay 2 --retry-connrefused --connect-timeout 10 --max-time 30 "$CURSOR_UPDATE_API")
+
+if [ -z "$API_RESPONSE" ]; then
+    echo "❌ ERROR: Failed to get response from update API"
+    exit 1
+fi
+
+NEW_PKGVER=$(echo "$API_RESPONSE" | jq -r '.version // empty')
+API_URL=$(echo "$API_RESPONSE" | jq -r '.url // empty')
+NEW_COMMIT=$(extract_commit "$API_URL")
+echo "Latest version found: ${NEW_PKGVER:-unknown}"
+
+if [ -z "$NEW_PKGVER" ] || [ -z "$NEW_COMMIT" ]; then
+    echo "❌ ERROR: Failed to extract version or commit from update API response"
+    exit 1
+fi
+if ! [[ "$NEW_PKGVER" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    echo "❌ ERROR: Invalid version format from update API: $NEW_PKGVER"
+    exit 1
+fi
+if ! [[ "$NEW_COMMIT" =~ ^[0-9a-f]{40}$ ]]; then
+    echo "❌ ERROR: Invalid commit format from update API: $NEW_COMMIT"
+    exit 1
+fi
+
 echo "New version: ${NEW_PKGVER}"
 echo "New commit: ${NEW_COMMIT}"
 echo ""
@@ -112,22 +91,18 @@ echo ""
 
 # Download .deb file
 echo "⬇️  Downloading .deb file..."
-curl -s "https://downloads.cursor.com/production/${NEW_COMMIT}/linux/x64/deb/amd64/deb/cursor_${NEW_PKGVER}_amd64.deb" -o /tmp/cursor_test.deb
+curl -fsSL --retry 3 --retry-delay 2 --retry-connrefused --connect-timeout 15 --max-time 300 "https://downloads.cursor.com/production/${NEW_COMMIT}/linux/x64/deb/amd64/deb/cursor_${NEW_PKGVER}_amd64.deb" -o "$TMP_DEB"
+if [ ! -s "$TMP_DEB" ]; then
+    echo "❌ ERROR: Downloaded .deb is empty"
+    exit 1
+fi
 
 # Calculate SHA512
 echo "🔐 Calculating SHA512 checksum..."
-NEW_SHA=$(sha512sum /tmp/cursor_test.deb | cut -d ' ' -f 1)
+NEW_SHA=$(sha512sum "$TMP_DEB" | cut -d ' ' -f 1)
 echo "SHA512: ${NEW_SHA:0:20}..."
 
-# Extract VSCode version from product.json
-echo "📦 Extracting VSCode version..."
-CODE_VERSION=$(bsdtar xOf /tmp/cursor_test.deb data.tar.xz 2>/dev/null | bsdtar xOf - ./usr/share/cursor/resources/app/product.json 2>/dev/null | jq -r .vscodeVersion)
-echo "VSCode version: ${CODE_VERSION}"
-
-# Get Electron version from VSCode's package-lock.json
-echo "⚡ Determining Electron version..."
-_ELECTRON=electron$(curl -sL "https://github.com/microsoft/vscode/raw/refs/tags/${CODE_VERSION}/package-lock.json" | jq -r '.packages."".devDependencies.electron |split(".")|.[0]')
-echo "Electron: ${_ELECTRON}"
+echo "⚡ Using upstream bundled runtime (no system Electron dependency)..."
 echo ""
 
 # Generate PKGBUILD from template
@@ -136,12 +111,10 @@ echo "📝 Generating PKGBUILD from template..."
 awk -v pkgver="$NEW_PKGVER" \
     -v commit="$NEW_COMMIT" \
     -v sha="$NEW_SHA" \
-    -v electron="$_ELECTRON" \
-    'BEGIN {OFS=""} 
+    'BEGIN {OFS=""}
      /^pkgver=/ {print "pkgver=" pkgver; next}
      /^_commit=/ {print "_commit=" commit " # sed'\''ded at GitHub WF"; next}
      /^sha512sums\[0\]=/ {print "sha512sums[0]=" sha; next}
-     /^_electron=/ {print "_electron=" electron; next}
      {print}' PKGBUILD.sed > PKGBUILD.test || {
     echo "❌ ERROR: Failed to generate PKGBUILD"
     exit 1
@@ -166,13 +139,6 @@ if ! grep -q "^_commit=${NEW_COMMIT}" PKGBUILD.test; then
     VALIDATION_FAILED=1
 else
     echo "✓ _commit is correct"
-fi
-
-if ! grep -q "^_electron=${_ELECTRON}$" PKGBUILD.test; then
-    echo "❌ ERROR: _electron not set correctly"
-    VALIDATION_FAILED=1
-else
-    echo "✓ _electron is correct"
 fi
 
 if ! grep -q "^sha512sums\[0\]=${NEW_SHA}" PKGBUILD.test; then

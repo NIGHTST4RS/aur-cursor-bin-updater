@@ -22,7 +22,7 @@ The workflow automatically stops before AUR publishing when run on the `developm
    - ✅ Generate PKGBUILD
    - ✅ Validate PKGBUILD
    - ✅ Commit to GitHub repository
-   - ❌ **STOP before AUR publishing** (line 128-130)
+   - ❌ **STOP before AUR publishing** on `development`
 
 4. Review the generated PKGBUILD in the GitHub commit
 
@@ -44,11 +44,11 @@ Use the provided `test_bash_workflow.sh` script to test locally.
 
 **What it does:**
 - Checks all dependencies
-- Backs up current PKGBUILD
+- Optionally backs up current PKGBUILD (during `makepkg` test)
 - Fetches latest version from Cursor API
 - Downloads .deb file
 - Calculates SHA512 checksum
-- Determines Electron version
+- Keeps Cursor's bundled runtime from the upstream `.deb`
 - Generates PKGBUILD from template
 - Validates the generated PKGBUILD
 - Optionally tests with `makepkg`
@@ -116,7 +116,6 @@ git checkout PKGBUILD
 ### 2. PKGBUILD Generation
 - ✅ `pkgver` is set correctly
 - ✅ `_commit` is set correctly
-- ✅ `_electron` is determined correctly
 - ✅ `sha512sum[0]` is calculated correctly
 - ✅ `ripgrep` dependency is present
 - ✅ All other dependencies are preserved
@@ -138,7 +137,7 @@ git checkout PKGBUILD
    - Update is needed
    - All previous steps succeed
 
-2. **Development Branch Protection**: The workflow stops at line 128-130 when on `development` branch, preventing AUR commits.
+2. **Development Branch Protection**: The workflow exits before AUR publish when on `development`, preventing AUR commits.
 
 3. **No Secrets on Forks**: If testing on a fork, AUR publishing will fail due to missing secrets (this is expected and safe).
 
@@ -168,13 +167,13 @@ Before merging to `main`:
 - Verify template file has correct placeholders
 - Check for special characters in values
 
-### Electron version detection fails
-- Check VSCode version extraction
-- Verify GitHub API access
-- Check jq parsing of package-lock.json
+### Bundled runtime integration fails
+- Verify `.deb` extraction completed successfully
+- Check that `usr/share/cursor` paths still match upstream layout
+- Verify `rg.sh` installation path still exists in app resources
 
 ### Local test script fails
-- Install missing dependencies: `sudo pacman -S libarchive jq curl`
+- Install missing dependencies: `sudo pacman -S libarchive curl jq gawk`
 - Check network connectivity
 - Verify Cursor API is accessible
 
