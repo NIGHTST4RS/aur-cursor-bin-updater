@@ -49,6 +49,9 @@ makepkg -si
 6. Commit to the repo branch.
 7. Publish to AUR (on `main`; skipped on `development`).
 
+When triggered manually, `workflow_dispatch` also supports `force_publish=true` to publish even if versions already match.
+The workflow also auto-publishes when the AUR package does not exist yet (initial bootstrap).
+
 ## Branch behavior
 
 - `development`: update + validation only, no AUR publish.
