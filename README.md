@@ -1,4 +1,4 @@
-# AUR Cursor AI Binary Package Updater
+# AUR Cursor AI Binary Package
 
 Automated maintenance system for the `cursor-ai-bin` AUR package. This repository monitors Cursor IDE releases and keeps an AUR-ready `PKGBUILD` updated.
 
