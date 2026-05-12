@@ -10,6 +10,7 @@ This project is an automation repo, not a manual install guide. It:
 - Updates `PKGBUILD` version, commit, and source checksum.
 - Publishes updates to AUR from `main`.
 - Uses Cursor's bundled runtime from the upstream `.deb` package to avoid system-Electron mismatch issues that can break Git/containers/Remote SSH.
+- Installs a `cursor` launcher wrapper that loads `~/.config/cursor-flags.conf` and delegates to Cursor's upstream launcher.
 - Pins third-party GitHub Actions to immutable commit SHAs.
 - Validates update API `version`/`commit` formats before generating package updates.
 - Uses Dependabot to keep pinned GitHub Actions dependencies updated.
@@ -73,6 +74,48 @@ makepkg -s
 ## Why bundled runtime
 
 Cursor staff has confirmed that community AUR packages can break if they run against a different system Electron version than Cursor's tested runtime for that release. This package keeps the runtime bundled from Cursor's official `.deb` build to avoid those mismatches.
+
+## Troubleshooting T3 Code launch behavior
+
+If Cursor opens fine from your terminal but T3 Code hangs or fails to launch it, the issue is usually the CLI entrypoint, not the Electron runtime itself.
+
+- T3 Code launches editors through CLI commands and expects non-blocking launcher behavior.
+- `cursor-ai-bin` now installs `/usr/bin/cursor` as a launcher wrapper that forwards to Cursor's upstream launcher and loads `~/.config/cursor-flags.conf`.
+- If `cursor` points directly to the raw app binary instead of the launcher path, behavior can differ (TTY attachment, ignored flags, or editor integration issues).
+
+Quick checks:
+
+```bash
+command -v cursor
+readlink -f "$(command -v cursor)"
+file "$(command -v cursor)"
+```
+
+Expected:
+
+- `command -v cursor` resolves to `/usr/bin/cursor`
+- `file ...` reports a shell script launcher (not only an ELF binary target)
+
+Validate flags file format:
+
+```bash
+mkdir -p ~/.config
+printf '%s\n' '--ozone-platform=wayland' > ~/.config/cursor-flags.conf
+```
+
+Update/reinstall package after launcher changes:
+
+```bash
+yay -Syu cursor-ai-bin
+# or
+paru -Syu cursor-ai-bin
+```
+
+If T3 Code still fails:
+
+- Ensure `cursor` is available in the same `PATH` seen by T3 Code.
+- Set editor selection to Cursor again inside T3 Code so it re-resolves the command.
+- Test with explicit command path `/usr/bin/cursor`.
 
 ## Contributing
 
