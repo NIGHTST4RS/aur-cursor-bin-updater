@@ -1,12 +1,17 @@
-
+/check_output.json
 check_output.json
 
-src
-pkg
-*.zst
+# makepkg output
+/src/
+src/
+/pkg/
+pkg/
+*.pkg.tar.*
+*.src.tar.*
 *.deb
-code.sh
 
-# Temporary test files
+# Temporary local test files
+/PKGBUILD.backup
+/PKGBUILD.test
 PKGBUILD.backup
 PKGBUILD.test
