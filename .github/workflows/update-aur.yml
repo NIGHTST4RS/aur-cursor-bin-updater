@@ -152,6 +152,10 @@ jobs:
             echo "ERROR: sha512sum not set correctly"
             exit 1
           fi
+          if ! grep -q "^install=cursor-ai-bin.install$" PKGBUILD; then
+            echo "ERROR: install script is not wired in PKGBUILD"
+            exit 1
+          fi
 
           echo "✓ PKGBUILD generated and validated"
           cat PKGBUILD
@@ -210,7 +214,7 @@ jobs:
           commit_message: "Update to version ${{ steps.check.outputs.new_version }} (commit ${{ steps.check.outputs.new_commit }})"
           allow_empty_commits: false
           ssh_keyscan_types: rsa,ecdsa,ed25519
-          assets: rg.sh
+          assets: rg.sh cursor-ai-bin.install
 
       - name: Summary
         run: |
