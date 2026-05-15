@@ -46,6 +46,10 @@ jobs:
           current_commit=$(grep -E '^_commit=' PKGBUILD | cut -d'=' -f2 | sed 's/ #.*//')
           echo "Local version: $current_pkgver (commit: ${current_commit:0:8})"
 
+          version_lt() {
+            [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | head -n1)" = "$1" ] && [ "$1" != "$2" ]
+          }
+
           # Get current version from AUR
           aur_response=$(curl -fsSL --retry 3 --retry-delay 2 --retry-connrefused --connect-timeout 10 --max-time 30 "https://aur.archlinux.org/rpc/?v=5&type=info&arg[]=cursor-ai-bin")
           aur_resultcount=0
@@ -62,19 +66,23 @@ jobs:
           echo "AUR package exists: ${aur_exists}"
           echo "Force publish requested: ${FORCE_PUBLISH}"
 
-          # Query the stable update API
-          api_response=$(curl -fsSL --retry 3 --retry-delay 2 --retry-connrefused --connect-timeout 10 --max-time 30 "https://api2.cursor.sh/updates/api/update/linux-x64/cursor/0.0.0/deadbeef/stable")
+          # Query the stable download API.
+          # The older api2 endpoint has started returning stale AppImage metadata.
+          api_response=$(curl -fsSL --retry 3 --retry-delay 2 --retry-connrefused --connect-timeout 10 --max-time 30 "https://www.cursor.com/api/download?platform=linux-x64&releaseTrack=stable")
           if [ -z "$api_response" ]; then
             echo "ERROR: Failed to get response from update API"
             exit 1
           fi
 
-          new_pkgver=$(echo "$api_response" | jq -r '.version')
-          api_url=$(echo "$api_response" | jq -r '.url')
-          new_commit=$(echo "$api_url" | sed -n 's|.*/production/\([^/]*\).*|\1|p')
+          new_pkgver=$(echo "$api_response" | jq -r '.version // empty')
+          new_commit=$(echo "$api_response" | jq -r '.commitSha // empty')
+          deb_url=$(echo "$api_response" | jq -r '.debUrl // empty')
+          if [ -z "$new_commit" ] && [ -n "$deb_url" ]; then
+            new_commit=$(echo "$deb_url" | sed -n 's|.*/production/\([^/]*\).*|\1|p')
+          fi
 
-          if [ -z "$new_pkgver" ] || [ -z "$new_commit" ]; then
-            echo "ERROR: Failed to extract version or commit from API response"
+          if [ -z "$new_pkgver" ] || [ -z "$new_commit" ] || [ -z "$deb_url" ]; then
+            echo "ERROR: Failed to extract stable version/commit/debUrl from API response"
             exit 1
           fi
           if ! [[ "$new_pkgver" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
@@ -87,6 +95,22 @@ jobs:
           fi
 
           echo "Latest: $new_pkgver (commit: ${new_commit:0:8})"
+
+          # Safety guard: never auto-downgrade unless force publish is explicit.
+          if [ "${FORCE_PUBLISH}" != "true" ] && version_lt "$new_pkgver" "$current_pkgver"; then
+            downgrade_reason="Refusing downgrade: stable API version ${new_pkgver} is older than local PKGBUILD ${current_pkgver}."
+            echo "$downgrade_reason"
+            echo "update_needed=false" >> $GITHUB_OUTPUT
+            echo "update_reason=${downgrade_reason}" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          if [ "${FORCE_PUBLISH}" != "true" ] && [ "${aur_exists}" = "true" ] && [ -n "$aur_pkgver" ] && version_lt "$new_pkgver" "$aur_pkgver"; then
+            downgrade_reason="Refusing downgrade: stable API version ${new_pkgver} is older than AUR ${aur_pkgver}."
+            echo "$downgrade_reason"
+            echo "update_needed=false" >> $GITHUB_OUTPUT
+            echo "update_reason=${downgrade_reason}" >> $GITHUB_OUTPUT
+            exit 0
+          fi
 
           # Decide whether we need to publish/update.
           update_reason=""
@@ -116,7 +140,7 @@ jobs:
 
           echo "::group::Generating PKGBUILD"
           # Download .deb file
-          curl -fsSL --retry 3 --retry-delay 2 --retry-connrefused --connect-timeout 15 --max-time 300 "https://downloads.cursor.com/production/${new_commit}/linux/x64/deb/amd64/deb/cursor_${new_pkgver}_amd64.deb" -o /tmp/cursor.deb
+          curl -fsSL --retry 3 --retry-delay 2 --retry-connrefused --connect-timeout 15 --max-time 300 "${deb_url}" -o /tmp/cursor.deb
           if [ ! -s /tmp/cursor.deb ]; then
             echo "ERROR: Downloaded .deb is empty"
             exit 1

@@ -47,7 +47,10 @@ echo "Current version: ${CURRENT_PKGVER:-none}"
 echo "Current commit: ${CURRENT_COMMIT:-none}"
 
 extract_commit() { echo "$1" | sed -n 's|.*/production/\([^/]*\).*|\1|p'; }
-CURSOR_UPDATE_API="https://api2.cursor.sh/updates/api/update/linux-x64/cursor/0.0.0/deadbeef/stable"
+version_lt() {
+    [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | head -n1)" = "$1" ] && [ "$1" != "$2" ]
+}
+CURSOR_UPDATE_API="https://www.cursor.com/api/download?platform=linux-x64&releaseTrack=stable"
 echo "🌐 Querying Cursor update API..."
 API_RESPONSE=$(curl -fsSL --retry 3 --retry-delay 2 --retry-connrefused --connect-timeout 10 --max-time 30 "$CURSOR_UPDATE_API")
 
@@ -57,12 +60,15 @@ if [ -z "$API_RESPONSE" ]; then
 fi
 
 NEW_PKGVER=$(echo "$API_RESPONSE" | jq -r '.version // empty')
-API_URL=$(echo "$API_RESPONSE" | jq -r '.url // empty')
-NEW_COMMIT=$(extract_commit "$API_URL")
+NEW_COMMIT=$(echo "$API_RESPONSE" | jq -r '.commitSha // empty')
+DEB_URL=$(echo "$API_RESPONSE" | jq -r '.debUrl // empty')
+if [ -z "$NEW_COMMIT" ] && [ -n "$DEB_URL" ]; then
+    NEW_COMMIT=$(extract_commit "$DEB_URL")
+fi
 echo "Latest version found: ${NEW_PKGVER:-unknown}"
 
-if [ -z "$NEW_PKGVER" ] || [ -z "$NEW_COMMIT" ]; then
-    echo "❌ ERROR: Failed to extract version or commit from update API response"
+if [ -z "$NEW_PKGVER" ] || [ -z "$NEW_COMMIT" ] || [ -z "$DEB_URL" ]; then
+    echo "❌ ERROR: Failed to extract version/commit/debUrl from update API response"
     exit 1
 fi
 if ! [[ "$NEW_PKGVER" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
@@ -78,6 +84,12 @@ echo "New version: ${NEW_PKGVER}"
 echo "New commit: ${NEW_COMMIT}"
 echo ""
 
+if [ -n "$CURRENT_PKGVER" ] && version_lt "$NEW_PKGVER" "$CURRENT_PKGVER"; then
+    echo "⚠️  Stable API returned an older version (${NEW_PKGVER}) than local PKGBUILD (${CURRENT_PKGVER})."
+    echo "⚠️  Refusing downgrade in local test run."
+    exit 0
+fi
+
 # Check if update is needed
 if [ "$CURRENT_PKGVER" = "$NEW_PKGVER" ] && [ "$CURRENT_COMMIT" = "$NEW_COMMIT" ]; then
     echo "ℹ️  No update needed. Current version matches latest."
@@ -91,7 +103,7 @@ echo ""
 
 # Download .deb file
 echo "⬇️  Downloading .deb file..."
-curl -fsSL --retry 3 --retry-delay 2 --retry-connrefused --connect-timeout 15 --max-time 300 "https://downloads.cursor.com/production/${NEW_COMMIT}/linux/x64/deb/amd64/deb/cursor_${NEW_PKGVER}_amd64.deb" -o "$TMP_DEB"
+curl -fsSL --retry 3 --retry-delay 2 --retry-connrefused --connect-timeout 15 --max-time 300 "$DEB_URL" -o "$TMP_DEB"
 if [ ! -s "$TMP_DEB" ]; then
     echo "❌ ERROR: Downloaded .deb is empty"
     exit 1
