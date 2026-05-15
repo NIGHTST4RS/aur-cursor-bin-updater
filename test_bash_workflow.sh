@@ -50,6 +50,51 @@ extract_commit() { echo "$1" | sed -n 's|.*/production/\([^/]*\).*|\1|p'; }
 version_lt() {
     [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | head -n1)" = "$1" ] && [ "$1" != "$2" ]
 }
+select_candidate() {
+    local source="$1"
+    local payload="$2"
+    local candidate_pkgver candidate_commit candidate_deb_url
+
+    candidate_pkgver=$(echo "$payload" | jq -r '.version // empty')
+    candidate_commit=$(echo "$payload" | jq -r '.commitSha // empty')
+    candidate_deb_url=$(echo "$payload" | jq -r '.debUrl // empty')
+    if [ -z "$candidate_commit" ] && [ -n "$candidate_deb_url" ]; then
+        candidate_commit=$(extract_commit "$candidate_deb_url")
+    fi
+
+    if [ -z "$candidate_pkgver" ] || [ -z "$candidate_commit" ] || [ -z "$candidate_deb_url" ]; then
+        echo "⚠️  Skipping ${source} candidate due to incomplete metadata"
+        return
+    fi
+    if ! [[ "$candidate_pkgver" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        echo "⚠️  Skipping ${source} candidate due to invalid version format: ${candidate_pkgver}"
+        return
+    fi
+    if ! [[ "$candidate_commit" =~ ^[0-9a-f]{40}$ ]]; then
+        echo "⚠️  Skipping ${source} candidate due to invalid commit format: ${candidate_commit}"
+        return
+    fi
+
+    if [ -z "${NEW_PKGVER:-}" ] || version_lt "$NEW_PKGVER" "$candidate_pkgver"; then
+        NEW_PKGVER="$candidate_pkgver"
+        NEW_COMMIT="$candidate_commit"
+        DEB_URL="$candidate_deb_url"
+        SELECTED_SOURCE="$source"
+    fi
+}
+
+query_golden_minor() {
+    local minor="$1"
+    [ -n "$minor" ] || return
+    local golden_response
+    golden_response=$(curl -fsSL --retry 2 --retry-delay 2 --retry-connrefused --connect-timeout 10 --max-time 30 "https://api2.cursor.sh/updates/api/download/golden/linux-x64-deb/cursor/${minor}" || true)
+    if [ -n "$golden_response" ]; then
+        select_candidate "golden/${minor}" "$golden_response"
+    else
+        echo "⚠️  Golden API unavailable for ${minor}, continuing."
+    fi
+}
+
 CURSOR_UPDATE_API="https://www.cursor.com/api/download?platform=linux-x64&releaseTrack=stable"
 echo "🌐 Querying Cursor update API..."
 API_RESPONSE=$(curl -fsSL --retry 3 --retry-delay 2 --retry-connrefused --connect-timeout 10 --max-time 30 "$CURSOR_UPDATE_API")
@@ -59,16 +104,25 @@ if [ -z "$API_RESPONSE" ]; then
     exit 1
 fi
 
-NEW_PKGVER=$(echo "$API_RESPONSE" | jq -r '.version // empty')
-NEW_COMMIT=$(echo "$API_RESPONSE" | jq -r '.commitSha // empty')
-DEB_URL=$(echo "$API_RESPONSE" | jq -r '.debUrl // empty')
-if [ -z "$NEW_COMMIT" ] && [ -n "$DEB_URL" ]; then
-    NEW_COMMIT=$(extract_commit "$DEB_URL")
+NEW_PKGVER=""
+NEW_COMMIT=""
+DEB_URL=""
+SELECTED_SOURCE=""
+
+select_candidate "stable" "$API_RESPONSE"
+STABLE_PKGVER=$(echo "$API_RESPONSE" | jq -r '.version // empty')
+STABLE_MINOR=$(echo "$STABLE_PKGVER" | awk -F. 'NF>=2 {print $1 "." $2}')
+CURRENT_MINOR=$(echo "${CURRENT_PKGVER:-}" | awk -F. 'NF>=2 {print $1 "." $2}')
+
+query_golden_minor "$CURRENT_MINOR"
+if [ "$STABLE_MINOR" != "$CURRENT_MINOR" ]; then
+    query_golden_minor "$STABLE_MINOR"
 fi
-echo "Latest version found: ${NEW_PKGVER:-unknown}"
+
+echo "Latest version found: ${NEW_PKGVER:-unknown} (source: ${SELECTED_SOURCE:-n/a})"
 
 if [ -z "$NEW_PKGVER" ] || [ -z "$NEW_COMMIT" ] || [ -z "$DEB_URL" ]; then
-    echo "❌ ERROR: Failed to extract version/commit/debUrl from update API response"
+    echo "❌ ERROR: Failed to resolve version/commit/debUrl from stable/golden API responses"
     exit 1
 fi
 if ! [[ "$NEW_PKGVER" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
